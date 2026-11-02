@@ -1,0 +1,38 @@
+name: qinlin-web
+services:
+  qinlin:
+    build: .
+    image: local/qinlin-web:1.0.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8088}:8080"
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-720}
+      QINLIN_AUTH_ERROR_CODES: ${QINLIN_AUTH_ERROR_CODES:-401}
+    volumes:
+      - qinlin-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 100
+    mem_limit: 256m
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: local
+      options:
+        max-size: 5m
+        max-file: "3"
+volumes:
+  qinlin-data:

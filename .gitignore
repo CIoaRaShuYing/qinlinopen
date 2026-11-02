@@ -1,0 +1,13 @@
+.env
+.venv/
+data/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+qinlin_login.json
+qinlin_community.json
+qinlin_doors.json
+*.sqlite3*
+*.db
+*.log

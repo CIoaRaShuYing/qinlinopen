@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#244e60"><title>邻里 · 门禁</title><link rel="stylesheet" href="/assets/style.css"><script src="/assets/app.js" defer></script></head>
+<body>
+<header class="topbar"><a class="brand" href="/" aria-label="邻里门禁首页"><span class="brand-mark" aria-hidden="true">门</span><span>邻里<span class="brand-sub">私人门禁</span></span></a><button id="logout" class="quiet" hidden>退出登录</button></header>
+<main>
+  <section id="login-view" class="login-layout" hidden>
+    <div class="welcome"><p class="eyebrow">回家的入口</p><h1>到家，<br>轻轻一点。</h1><p>小区大门、楼栋入口，<br>在一个页面里轻松打开。</p><div class="door-art" aria-hidden="true"><div class="door-frame"><div class="door-panel"><i></i></div></div><span>邻里 · 门禁</span></div></div>
+    <div class="login-card"><span class="small-label">管理员入口</span><h2>登录门禁管理</h2><p class="muted">使用配置的管理账号和密码。</p><form id="admin-form"><label for="username">账号</label><input id="username" name="username" autocomplete="username" required maxlength="100"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024"><button class="primary full" type="submit">登录</button><p id="login-message" class="form-message" role="status"></p></form><p class="footnote">管理密码与亲邻短信验证码分别使用。</p></div>
+  </section>
+  <section id="dashboard" hidden>
+    <div class="page-heading"><div><p class="eyebrow">我的门禁</p><h1>欢迎回家。</h1></div><button id="refresh" class="secondary">刷新状态 <span aria-hidden="true">↻</span></button></div>
+    <div id="credential-status" class="status-panel"><span id="status-dot" class="status-dot"></span><div><strong id="state-label">正在检查凭证…</strong><p id="state-detail">请稍候</p></div><span id="last-checked" class="checked"></span></div>
+    <div class="workspace"><section class="door-section"><div class="section-heading"><div><span class="small-label">当前小区</span><h2 id="community-name">尚未获取小区</h2></div><div class="community-controls"><select id="community-select" aria-label="切换小区" hidden></select><button id="set-default" class="quiet" hidden>设为默认展示小区</button></div></div><p class="section-note">选择要打开的门，点击即发送开门指令。</p><div id="doors" class="door-grid"></div><div id="empty-doors" class="empty-state" hidden><span aria-hidden="true">⌂</span><h3>先连接你的亲邻账户</h3><p>完成手机验证后，即可看到有权限的门禁。</p></div><p id="operation-message" class="operation-message" role="status" aria-live="polite"></p></section>
+    <aside><details id="auth-details" class="side-card"><summary><span>亲邻账户</span><span class="summary-action">重新验证</span></summary><p class="muted">凭证失效时，用亲邻绑定的手机号重新登录。</p><form id="qinlin-form"><label for="mobile">手机号</label><input id="mobile" name="mobile" type="tel" inputmode="numeric" autocomplete="tel" pattern="1[3-9][0-9]{9}" maxlength="11" placeholder="请输入 11 位手机号" required><label for="sms-code">短信验证码</label><div class="code-row"><input id="sms-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,8}" maxlength="8" placeholder="验证码" required><button id="send-sms" class="secondary" type="button">获取验证码</button></div><button class="primary full" type="submit">验证并连接</button><p id="qinlin-message" class="form-message" role="status"></p></form></details>
+    <section class="side-card usage"><span class="small-label">使用提示</span><p>开门指令提交后，请确认门禁实际响应。</p><p>如果请求超时，请先现场确认，再决定是否重新操作。</p></section></aside></div>
+    <section class="activity"><div class="section-heading"><h2>最近操作</h2><span class="muted">仅保留必要操作记录</span></div><ul id="activity-list"><li class="muted">还没有操作记录</li></ul></section>
+  </section>
+  <p id="boot-message" class="boot-message" role="status">正在载入…</p>
+</main><footer><span>邻里 · 私人门禁</span><span>凭证保存在你的服务器</span></footer>
+</body></html>
