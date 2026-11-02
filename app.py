@@ -38,6 +38,7 @@ class DoorService:
                 return previous.copy()
             try:
                 communities = self.client.communities(token)
+                self.store.sync_inventory(communities)
                 allowed = {c["id"] for c in communities}
                 preferred = self.store.get("preferred_community_id")
                 if preferred not in allowed:
@@ -48,7 +49,10 @@ class DoorService:
                 if selected not in allowed:
                     selected = communities[0]["id"] if communities else None
                 doors = self.client.doors(token, selected) if selected is not None else []
+                if selected is not None:
+                    self.store.sync_inventory(communities, selected, doors)
                 self.snapshot = {"state": "valid", "checkedAt": time.time(), "communities": communities, "communityId": selected, "defaultCommunityId": preferred, "doors": doors}
+                self.store.put('last_inventory_view',self.snapshot)
             except ServiceError as error:
                 if error.code == "COMMUNITY_NOT_ALLOWED":
                     raise
@@ -130,6 +134,14 @@ def create_app(config=None, client=None):
     def ok(data=None, status=200):
         return jsonify({"ok": True, "data": data}), status
 
+    def admin_status(snapshot):
+        # Secrets are added only to authenticated admin responses, never service snapshots.
+        access = store.door_access(snapshot)
+        for item in access:
+            item['url'] = f"{origin}/api/v1/communities/{item['communityId']}/doors/{item['doorId']}/open"
+        return {**snapshot, 'apiDoors': access, 'recent': store.recent(),
+                'inventoryEvents':store.inventory_events(), 'cachedInventory':store.get('last_inventory_view')}
+
     def require_admin(fn):
         @wraps(fn)
         def wrapped(*args, **kwargs):
@@ -160,6 +172,12 @@ def create_app(config=None, client=None):
         retry = store.limit(key, maximum, window)
         if retry:
             raise ServiceError("RATE_LIMITED", f"操作频繁，请在 {retry} 秒后重试", 429)
+
+    @app.post('/api/inventory-events/<int:event_id>/acknowledge')
+    @require_admin
+    def acknowledge_inventory_event(event_id):
+        store.acknowledge_event(event_id)
+        return ok({'inventoryEvents':store.inventory_events()})
 
     @app.before_request
     def protect_writes():
@@ -245,7 +263,8 @@ def create_app(config=None, client=None):
     @app.get("/api/status")
     @require_admin
     def status():
-        return ok({**service.refresh(), "recent": store.recent()})
+        with service.lock:
+            return ok(admin_status(service.refresh()))
 
     @app.post("/api/refresh")
     @require_admin
@@ -253,7 +272,8 @@ def create_app(config=None, client=None):
         rate_limit("refresh", 10, 60)
         data = body()
         community_id = positive_id(data, "communityId") if "communityId" in data else None
-        return ok({**service.refresh(True, community_id), "recent": store.recent()})
+        with service.lock:
+            return ok(admin_status(service.refresh(True, community_id)))
 
     @app.post("/api/qinlin/sms")
     @require_admin
@@ -283,7 +303,7 @@ def create_app(config=None, client=None):
                 raise ServiceError(error["code"], error["message"], 409 if snapshot["state"] in ("expired", "unconfigured") else 503)
             store.put("preferred_community_id", community_id)
             service.snapshot["defaultCommunityId"] = community_id
-            return ok({**service.snapshot, "recent": store.recent()})
+            return ok(admin_status(service.snapshot))
 
     @app.post("/api/qinlin/login")
     @require_admin
@@ -300,7 +320,27 @@ def create_app(config=None, client=None):
             store.put("preferred_community_id", None)
             service.invalidate()
             store.audit("login", "", "authenticated")
-            return ok({**service.refresh(True), "recent": store.recent()})
+            return ok(admin_status(service.refresh(True)))
+
+    @app.post('/api/door-tokens/reset')
+    @require_admin
+    def reset_tokens():
+        data = body()
+        if data.get('confirm') is not True:
+            raise ServiceError('CONFIRMATION_REQUIRED', '请确认重置，旧 Token 将立即失效', 400)
+        reset_all = data.get('all') is True
+        if reset_all and ('communityId' in data or 'doorId' in data):
+            raise ServiceError('INVALID_REQUEST', '重置范围不明确', 400)
+        cid = None if reset_all else positive_id(data, 'communityId')
+        did = None if reset_all else positive_id(data, 'doorId')
+        rate_limit('token-reset', 20, 60)
+        # Shares the lock with authorization/open, so reset can't race an old token check.
+        with service.lock:
+            count = store.reset_door_tokens(cid, did)
+            if not reset_all and not count:
+                raise ServiceError('TOKEN_NOT_FOUND', '该门尚未生成 Token，请先刷新门列表', 404)
+            store.audit('reset_tokens', 'all' if reset_all else did, 'reset')
+            return ok({'count': count, **admin_status(service.snapshot)})
 
     @app.post("/api/doors/open")
     @require_admin
@@ -316,10 +356,23 @@ def create_app(config=None, client=None):
 
     @app.post("/api/v1/doors/open")
     def api_open():
-        require_token()
-        rate_limit("all-opens", 20, 60)
+        if not request.headers.get('Authorization', '').startswith('Bearer '):
+            raise ServiceError('API_UNAUTHORIZED', '该门的 Token 无效或缺失', 401)
         data = body()
-        return ok(service.open(positive_id(data, "communityId"), positive_id(data, "doorId")))
+        return open_with_door_token(positive_id(data, 'communityId'), positive_id(data, 'doorId'))
+
+    def open_with_door_token(community_id, door_id):
+        with service.lock:
+            if not store.valid_door_token(community_id, door_id, request.headers.get('Authorization', '')):
+                if store.retired_door_token(community_id, door_id, request.headers.get('Authorization','')):
+                    raise ServiceError('DOOR_INTERFACE_CHANGED','小区或门禁标识已变化，此接口已失效；请登录网页重新配置请求地址和 Token',410)
+                raise ServiceError('API_UNAUTHORIZED', '该门的 Token 无效、已重置或缺失', 401)
+            rate_limit('all-opens', 20, 60)
+            return ok(service.open(community_id, door_id))
+
+    @app.post('/api/v1/communities/<int:community_id>/doors/<int:door_id>/open')
+    def scoped_api_open(community_id, door_id):
+        return open_with_door_token(community_id, door_id)
 
     @app.get("/api/v1/status")
     def api_status():

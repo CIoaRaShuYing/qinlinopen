@@ -48,17 +48,22 @@ docker compose up -d
 
 ## API
 
-`API_TOKEN` 是此服务的调用密钥，与亲邻会话和管理员密码不同。仅通过请求头传递，不支持 URL 参数 Token，也不支持 GET 开门。
+登录管理页面后，点击对应门卡上的 **接口与长期 Token**，进入该门的详情层，查看独立 POST 地址、长期 Token 和完整 cURL。可复制地址、复制 Token、显示/隐藏 Token 或复制完整请求。地址已包含小区与门 ID，无需请求体。
 
 ```bash
-# QINLIN_API_TOKEN 从自己的私有配置读取，不要提交到代码仓库
-curl --request POST 'https://door.example.com/api/v1/doors/open' \
-  --header "Authorization: Bearer $QINLIN_API_TOKEN" \
-  --header 'Content-Type: application/json' \
-  --data '{"communityId":1001,"doorId":2001}'
+curl --request POST 'https://door.example.com/api/v1/communities/1001/doors/2001/open' \
+  --header "Authorization: Bearer $DOOR_TOKEN"
 ```
 
-以上 ID 为虚构示例。使用 `GET /api/v1/status`（同样携带 Authorization）查询实际 ID、凭证状态、社区和当前门列表。开门前服务端始终重新核验目标社区和门的权限。
+ID 为虚构示例。Token 不设置过期时间，存储在数据卷内，重启服务及重新认证亲邻后保持不变；它只授权对应小区的对应门。上游门禁权限仍会实时校验，亲邻凭证过期仍返回 `QINLIN_SESSION_EXPIRED`。
+
+- **重置此门 Token**：二次确认后仅更换该门 Token。
+- **重置全部 Token**：二次确认后更换所有小区已生成的 Token，包括非当前小区。
+- 重置后地址不变，旧 Token 立即失效，需更新快捷指令/脚本。取消确认不会发送重置请求。已经发出的开门指令不能通过重置撤回。
+- 凭证过期或网络异常时仍可以管理以前生成的接口。该记录不表示账户仍有门禁权限。
+- 没有 GET 开门接口，Token 不接受 URL 参数，必须使用 `Authorization: Bearer` 请求头。
+
+升级说明：原 `.env` 中的共享 `API_TOKEN` **现在只用于 GET /api/v1/status，不再授权开门**。原通用 `POST /api/v1/doors/open` 可继续传 `{communityId,doorId}`，但请求头必须改用对应门的 Token。请到管理页复制新请求配置。公开状态接口不会返回门禁 Token。
 
 成功响应表示亲邻平台接受指令，不能证明物理门已经打开：
 
@@ -72,6 +77,7 @@ curl --request POST 'https://door.example.com/api/v1/doors/open' \
 | 409 | QINLIN_SESSION_EXPIRED | 亲邻凭证过期；到 Web 端重新认证 |
 | 409 | QINLIN_NOT_CONFIGURED | 尚未连接亲邻账户 |
 | 403 | COMMUNITY_NOT_ALLOWED / DOOR_NOT_ALLOWED | 目标不在当前账户授权范围 |
+| 410 | DOOR_INTERFACE_CHANGED | 原小区或门 ID 已失效，请在网页重新配置地址和 Token |
 | 429 | OPEN_TOO_FREQUENT / RATE_LIMITED | 操作频繁，稍候再操作 |
 | 503 | UPSTREAM_UNAVAILABLE | 网络或上游异常，不能判为凭证过期 |
 | 502 / 504 | OPEN_RESULT_UNKNOWN | 指令结果未知，请现场确认；服务不自动重试 |
@@ -81,12 +87,12 @@ curl --request POST 'https://door.example.com/api/v1/doors/open' \
 
 ## 运维与数据
 
-- SQLite 存放亲邻会话、默认小区偏好、管理员会话哈希、频率计数、最近 500 条脱敏操作记录；持久化到 `qinlin-data` 数据卷。数据库包含敏感凭据，依赖服务器和备份的访问控制，不声称数据库内容已加密。
+- SQLite 存放亲邻会话、默认小区偏好、门禁长期 Token、管理员会话哈希、频率计数、最近 500 条脱敏操作记录；持久化到 `qinlin-data` 数据卷。数据库包含敏感凭据，依赖服务器和备份的访问控制，不声称数据库内容已加密。
 - 管理会话默认保留 720 小时，Cookie 使用 HttpOnly、SameSite=Strict 和 HTTPS Secure；修改管理员账号或密码配置并重建容器后，旧登录会话失效。
 - 单进程 Waitress + 线程锁串行处理凭据变更和开门。同一扇门 5 秒内不重复提交；请勿直接改为多进程或多副本部署。
 - `.env`、数据库、会话 JSON、缓存均被 Git 和 Docker 排除。不要将上述文件、真实截图或服务器连接信息提交到公开仓库。
 - 停止容器后备份数据卷，再启动。恢复时停止服务并恢复完整数据库目录，保留 UID/GID 10001 的读写权限。不要用 `docker compose down -v` 进行常规升级。
-- API Token 轮换：修改私有 `.env` 后 `docker compose up -d --force-recreate`，并同步更新调用方。
+- 门禁 Token 轮换：在管理页执行单门或全部重置并二次确认。状态查询 Token 轮换：修改私有 `.env` 后重建容器。
 - 健康检查 `/healthz` 只检查本服务和数据库，不连接亲邻平台。
 
 ## 本地开发与验证
@@ -107,3 +113,11 @@ node --check static/app.js
 ## 协议参考
 
 亲邻协议参考 [ha-qinlin](https://github.com/burgesswu/ha-qinlin)，签名及短信网关分开处理，版本为 `4.9.3`。本服务是非官方实现，上游接口变化可能需要更新。第三方许可见 `THIRD_PARTY_NOTICES.md`。
+
+## 服务器缓存与接口变更提醒
+
+成功查询后将小区列表、各小区门列表、最近展示内容及每门接口保存在 SQLite。服务重启不丢失缓存；网络异常或凭证过期时可查看标注为缓存的卡片和接口，但开门仍需实时验证权限，缓存不授权离线开门。
+
+查询到小区 ID 列表变化，或刷新/访问对应小区时发现门 ID 列表变化，会生成持久提醒。仅名称变化不更换地址和 Token。ID 消失时停用旧接口；新增 ID 使用新地址和独立 Token，提示重新配置。不会用相同名称猜测并自动绑定旧接口。消失的 ID 恢复后地址不变，但会更换 Token 并提醒。首次安装建立基线不提示，网络故障不会被当作门禁删除。
+
+提醒保留到管理员点击“已了解”，重启不消失。主页下方保留“已失效的接口记录”供核对。变化检测发生在成功查询时，不提供后台定时监控或短信通知。

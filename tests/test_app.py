@@ -57,6 +57,7 @@ def env(tmp_path):
     fake = FakeQinlin()
     cfg = {"TESTING": True, "PUBLIC_ORIGIN": ORIGIN, "ADMIN_USERNAME": "admin", "ADMIN_PASSWORD": "test-password-12345", "ADMIN_PASSWORD_HASH": "", "API_TOKEN": TOKEN, "DATA_DIR": str(tmp_path)}
     app = create_app(cfg, fake)
+    app.extensions['store'].door_access({'state':'valid','communityId':1001,'communities':fake.communities('fixture'),'doors':fake.doors('fixture',1001)})
     return app, app.test_client(), fake, cfg
 
 
@@ -68,7 +69,9 @@ def login(client):
     return post(client, "/api/auth/login", {"username": "admin", "password": "test-password-12345"})
 
 
-def external(client, data=None, token=TOKEN):
+def external(client, data=None, token=None):
+    if token is None:
+        token=client.application.extensions['store'].door_access({'state':'unknown'})[0]['token']
     return client.post("/api/v1/doors/open", json=data or {"communityId": 1001, "doorId": 2001}, headers={"Authorization": "Bearer " + token})
 
 
@@ -109,8 +112,8 @@ def test_status_does_not_leak_session_and_open_checks_membership(env):
     response = client.get("/api/status", base_url=ORIGIN)
     assert response.json["data"]["state"] == "valid"
     assert b"secret-session" not in response.data
-    assert external(client, {"communityId": 999, "doorId": 2001}).status_code == 403
-    assert external(client, {"communityId": 1001, "doorId": 999}).status_code == 403
+    assert external(client, {"communityId": 999, "doorId": 2001}).status_code == 401
+    assert external(client, {"communityId": 1001, "doorId": 999}).status_code == 401
     assert fake.opens == []
     assert external(client).json["data"]["code"] == "OPEN_ACCEPTED"
     assert external(client).status_code == 429
@@ -361,3 +364,196 @@ def test_expiry_at_open_response_clears_cached_communities(env):
     snapshot = app.extensions["doors"].snapshot
     assert snapshot["state"] == "expired"
     assert snapshot["communities"] == [] and snapshot["doors"] == []
+
+
+def scoped(client, token, cid=1001, did=2001):
+    return client.post(f'/api/v1/communities/{cid}/doors/{did}/open',headers={'Authorization':'Bearer '+token})
+
+
+def access(app):
+    return {(x['communityId'],x['doorId']):x['token'] for x in app.extensions['store'].door_access({'state':'unknown'})}
+
+
+def test_scoped_url_needs_no_body_and_has_door_isolation(env):
+    app, client, fake, _=env
+    app.extensions['store'].put('token','fake-session')
+    token=access(app)[1001,2001]
+    assert scoped(client,token,did=2002).status_code==401
+    assert scoped(client,token,cid=1002).status_code==401
+    assert scoped(client,TOKEN).status_code==401
+    assert external(client,token=TOKEN).status_code==401
+    assert client.get('/api/v1/communities/1001/doors/2001/open').status_code==405
+    assert client.post('/api/v1/communities/1001/doors/2001/open?token='+token).status_code==401
+    assert fake.opens==[]
+    assert scoped(client,token).status_code==200
+    assert fake.opens==[(1001,2001)]
+
+
+def test_admin_discovery_only_and_persistent_tokens(env):
+    app, client, fake, cfg=env
+    app.extensions['store'].put('token','fake-session')
+    login(client)
+    data=client.get('/api/status',base_url=ORIGIN).json['data']
+    entry=data['apiDoors'][0]
+    assert entry['url']==ORIGIN+'/api/v1/communities/1001/doors/2001/open'
+    assert len(entry['token'])>=40
+    public=client.get('/api/v1/status',headers={'Authorization':'Bearer '+TOKEN})
+    assert 'apiDoors' not in public.json['data']
+    assert entry['token'].encode() not in public.data
+    restarted=create_app(cfg,fake)
+    assert access(restarted)==access(app)
+    post(client,'/api/qinlin/login',{'mobile':'13800000000','code':'123456'})
+    assert access(app)[1001,2001]==entry['token']
+
+
+def test_single_reset_requires_confirmation_and_preserves_others(env):
+    app,client,fake,_=env
+    store=app.extensions['store']
+    store.put('token','fake-session')
+    store.door_access({'state':'valid','communityId':1002,'communities':[{'id':1002,'name':'示例二'}],'doors':[{'id':2002,'name':'示例门二'}]})
+    before=access(app)
+    data={'communityId':1001,'doorId':2001}
+    assert post(client,'/api/door-tokens/reset',{**data,'confirm':True}).status_code==401
+    login(client)
+    for confirm in (None,False,'true',1):
+        assert post(client,'/api/door-tokens/reset',{**data,'confirm':confirm}).status_code==400
+    assert access(app)==before
+    assert client.post('/api/door-tokens/reset',json={**data,'confirm':True},headers={'Origin':'https://evil.test'},base_url=ORIGIN).status_code==403
+    assert post(client,'/api/door-tokens/reset',{**data,'confirm':True}).json['data']['count']==1
+    after=access(app)
+    assert after[1001,2001]!=before[1001,2001]
+    assert after[1002,2002]==before[1002,2002]
+    assert scoped(client,before[1001,2001]).status_code==401
+    assert scoped(client,after[1001,2001]).status_code==200
+    assert len(fake.opens)==1
+
+
+def test_reset_all_across_communities_works_while_expired(env):
+    app,client,fake,_=env
+    store=app.extensions['store']
+    store.put('token','expired-session')
+    store.door_access({'state':'valid','communityId':1002,'communities':[{'id':1002,'name':'示例二'}],'doors':[{'id':2002,'name':'示例门二'}]})
+    before=access(app)
+    login(client)
+    fake.failure=ServiceError('QINLIN_SESSION_EXPIRED','过期',409)
+    assert client.get('/api/status',base_url=ORIGIN).json['data']['state']=='expired'
+    assert post(client,'/api/door-tokens/reset',{'all':True}).status_code==400
+    result=post(client,'/api/door-tokens/reset',{'all':True,'confirm':True})
+    assert result.json['data']['count']==2
+    after=access(app)
+    for (cid,did),token in before.items():
+        assert token!=after[cid,did]
+        assert scoped(client,token,cid,did).status_code==401
+    assert scoped(client,after[1001,2001]).status_code==409
+    assert fake.opens==[] and fake.sms==[]
+
+
+def test_revoked_upstream_permission_blocks_still_valid_door_token(env):
+    app,client,fake,_=env
+    app.extensions['store'].put('token','fake-session')
+    token=access(app)[1001,2001]
+    fake.doors=lambda *args: []
+    assert scoped(client,token).status_code==403
+    assert fake.opens==[]
+
+
+def test_inventory_rename_keeps_url_token_and_silent(env):
+    app,client,fake,_=env
+    app.extensions['store'].put('token','session')
+    login(client)
+    first=client.get('/api/status',base_url=ORIGIN).json['data']
+    fake.communities=lambda _: [{'id':1001,'name':'改名小区'}]
+    fake.doors=lambda *_: [{'id':2001,'name':'改名门','online':'online','kind':'楼栋门'}]
+    changed=post(client,'/api/refresh',{}).json['data']
+    assert changed['apiDoors'][0]['url']==first['apiDoors'][0]['url']
+    assert changed['apiDoors'][0]['token']==first['apiDoors'][0]['token']
+    assert changed['apiDoors'][0]['doorName']=='改名门'
+    assert changed['inventoryEvents']==[]
+
+
+def test_changed_door_id_invalidates_old_and_persists_notice(env):
+    app,client,fake,cfg=env
+    app.extensions['store'].put('token','session')
+    login(client)
+    first=client.get('/api/status',base_url=ORIGIN).json['data']['apiDoors'][0]
+    fake.doors=lambda *_:[{'id':2002,'name':'示例楼栋门','online':'online','kind':'楼栋门'}]
+    changed=post(client,'/api/refresh',{}).json['data']
+    old,new=changed['apiDoors']
+    assert old['active']==0 and new['active']==1
+    assert first['url']!=new['url'] and first['token']!=new['token']
+    assert scoped(client,first['token']).status_code==410
+    events=changed['inventoryEvents']
+    assert len(events)==1 and events[0]['removed'][0]['id']==2001 and events[0]['added'][0]['id']==2002
+    restarted=create_app(cfg,fake)
+    assert restarted.extensions['store'].inventory_events()==events
+    assert post(client,f"/api/inventory-events/{events[0]['id']}/acknowledge",{}).status_code==200
+    assert app.extensions['store'].inventory_events()==[]
+    assert post(client,'/api/refresh',{}).json['data']['inventoryEvents']==[]
+
+
+def test_changed_community_id_never_reuses_token_even_same_name(env):
+    app,client,fake,_=env
+    app.extensions['store'].put('token','session')
+    login(client)
+    first=client.get('/api/status',base_url=ORIGIN).json['data']['apiDoors'][0]
+    fake.communities=lambda _: [{'id':1002,'name':'测试小区'}]
+    changed=post(client,'/api/refresh',{}).json['data']
+    assert changed['communityId']==1002
+    old,new=changed['apiDoors']
+    assert old['active']==0 and new['active']==1
+    assert old['token']!=new['token']
+    assert scoped(client,first['token']).status_code==410
+    assert changed['inventoryEvents'][0]['kind']=='communities'
+
+
+def test_reappearance_rotates_token_and_notifies(env):
+    app,client,fake,_=env
+    app.extensions['store'].put('token','session')
+    login(client)
+    original=fake.doors
+    first=client.get('/api/status',base_url=ORIGIN).json['data']['apiDoors'][0]
+    fake.doors=lambda *_:[]
+    post(client,'/api/refresh',{})
+    fake.doors=original
+    returned=post(client,'/api/refresh',{}).json['data']
+    assert returned['apiDoors'][0]['active']==1
+    assert returned['apiDoors'][0]['token']!=first['token']
+    assert scoped(client,first['token']).status_code==401
+    assert any(x['kind']=='reactivated' for x in returned['inventoryEvents'])
+
+
+def test_network_failure_preserves_persistent_inventory_and_no_false_notice(env):
+    app,client,fake,cfg=env
+    app.extensions['store'].put('token','session')
+    login(client)
+    first=client.get('/api/status',base_url=ORIGIN).json['data']
+    fake.failure=ServiceError('UPSTREAM_UNAVAILABLE','网络异常',503)
+    restarted=create_app(cfg,fake)
+    other=restarted.test_client()
+    login(other)
+    cached=other.get('/api/status',base_url=ORIGIN).json['data']
+    assert cached['state']=='unknown'
+    assert cached['cachedInventory']['doors']==first['doors']
+    assert cached['inventoryEvents']==[]
+    assert cached['apiDoors'][0]['token']==first['apiDoors'][0]['token']
+    assert cached['apiDoors'][0]['active']==1
+
+
+def test_inventory_notice_ack_requires_login_and_origin(env):
+    _,client,_,_=env
+    assert post(client,'/api/inventory-events/1/acknowledge',{}).status_code==401
+    login(client)
+    assert client.post('/api/inventory-events/1/acknowledge',json={},base_url=ORIGIN,headers={'Origin':'https://evil.test'}).status_code==403
+
+
+def test_existing_token_schema_migration_preserves_credentials(tmp_path):
+    import sqlite3
+    with sqlite3.connect(tmp_path/'qinlin.sqlite3') as db:
+        db.execute('CREATE TABLE door_tokens (community_id INTEGER, door_id INTEGER, community_name TEXT, door_name TEXT, token TEXT, updated REAL, PRIMARY KEY (community_id,door_id))')
+        db.execute("INSERT INTO door_tokens VALUES(1001,2001,'示例小区','示例门','old-persistent-token',1)")
+    store=Store(tmp_path)
+    assert store.valid_door_token(1001,2001,'Bearer old-persistent-token')
+    store.sync_inventory([{'id':1001,'name':'示例小区'}])
+    store.sync_inventory([{'id':1001,'name':'示例小区'}],1001,[{'id':2001,'name':'示例门'}])
+    assert store.inventory_events()==[]
+    assert store.valid_door_token(1001,2001,'Bearer old-persistent-token')
