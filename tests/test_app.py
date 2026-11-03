@@ -275,7 +275,12 @@ def test_transport_sends_login_encrypted_and_sms_separately():
     client.send_sms("13800000000")
     url, kwargs = transport.calls[1]
     assert "gateway2.qinlinkeji.com" in url
-    assert kwargs["headers"]["Version"] == "v2"
+    assert kwargs["headers"]["version"] == "v2"
+    assert kwargs["headers"]["content-type"] == "application/json; charset=utf-8"
+    prepared = requests.Request('POST', url, headers=kwargs['headers'], json=kwargs['json']).prepare()
+    assert prepared.headers['Content-Type'] == 'application/json; charset=utf-8'
+    # Case-insensitive lookup alone previously missed the actual wire casing bug.
+    assert {'appid', 'nonce', 'timestamp', 'version', 'sign'} <= set(prepared.headers)
     assert kwargs["json"] == {"mobile": "13800000000"}
 
 

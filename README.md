@@ -97,6 +97,25 @@ ID 为虚构示例。Token 不设置过期时间，存储在数据卷内，重�
 
 ## 本地开发与验证
 
+### 亲邻网关诊断日志
+
+所有亲邻接口响应均记录到数据卷中的 `/app/data/logs/qinlin-gateway.log`（本机运行时为 `DATA_DIR/logs/qinlin-gateway.log`），每行一条 JSON。包括 UTC 时间、接口路径、HTTP 状态、耗时、响应字节数、响应头及完整响应内容；JSON 保留结构，HTML/文本错误页保留正文，不截断正文。没有收到响应时记录异常类型，不记录可能携带凭据的异常原文。请求不自动重试。
+
+手机号、会话、Token、验证码、Cookie 等已识别敏感字段及请求凭据回显会脱敏；不记录请求正文或 URL 查询参数。脱敏不是匿名化，响应可能仍包含小区、门禁等个人信息，日志仅供服务器管理员排查，不提供公开读取接口，也不能上传到公开仓库。
+
+每个日志文件达到 10 MiB 时轮转，保留 5 份历史文件，加当前文件共 6 份；单条响应不会截断，因此超大响应可能使单文件超过阈值。Linux 日志目录权限为 0700，文件为 0600；重建容器保留日志。日志写入失败不会改变接口结果或重试开门。
+
+```bash
+# 完整脱敏响应，含成功和失败
+docker compose exec qinlin tail -n 30 /app/data/logs/qinlin-gateway.log
+# 实时跟踪完整脱敏响应，轮转后继续跟踪
+docker compose exec qinlin tail -F /app/data/logs/qinlin-gateway.log
+# 容器日志只显示状态、耗时等摘要
+docker compose logs --tail 50 qinlin
+```
+
+日志从升级后开始生成，无法还原过去未保存的网关响应。首次网关请求完成后创建日志文件。
+
 ```bash
 python -m venv .venv
 # 激活虚拟环境后
@@ -113,6 +132,8 @@ node --check static/app.js
 ## 协议参考
 
 亲邻协议参考 [ha-qinlin](https://github.com/burgesswu/ha-qinlin)，签名及短信网关分开处理，版本为 `4.9.3`。本服务是非官方实现，上游接口变化可能需要更新。第三方许可见 `THIRD_PARTY_NOTICES.md`。
+
+网关兼容性：短信签名头 `appid/nonce/timestamp/version/sign` 和所有接口的设备请求头均以小写发送，发送入口统一转换业务头名，避免网关对大小写处理不兼容导致“缺少必须的签名字段”。JSON 使用 `application/json; charset=utf-8`，门列表使用表单格式。业务参数名称（如 `sessionId`、`smsCode`、`communityId`）和签名输入大小写不转换；短信请求体仍仅含 `mobile`。
 
 ## 服务器缓存与接口变更提醒
 

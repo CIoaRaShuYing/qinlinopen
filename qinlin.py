@@ -56,23 +56,32 @@ def normalize_doors(data):
 
 
 class QinlinClient:
-    def __init__(self, auth_codes=(401,), transport=None):
+    def __init__(self, auth_codes=(401,), transport=None, response_log=None):
         self.auth_codes = {str(c) for c in auth_codes}
         self.transport = transport or requests.Session()
+        self.response_log = response_log
         self.headers = {
-            "Qvendor": "Xiaomi", "Openid": secrets.token_hex(8),
-            "Qversioncode": "3113", "Qversionname": "4.9.3", "Qchannel": "xiaomi",
-            "Qplatform": "0", "User-Agent": "Dart/2.18 (dart:io)",
+            "qvendor": "Xiaomi", "openid": secrets.token_hex(8),
+            "qversioncode": "3113", "qversionname": "4.9.3", "qchannel": "xiaomi",
+            "qplatform": "0", "user-agent": "Dart/2.18 (dart:io)",
         }
 
     def _request(self, url, *, opening=False, **kwargs):
         # requests defaults to no retry. Never follow redirects carrying credentials.
+        # The Qinlin gateway rejects title-cased signing headers despite HTTP semantics.
+        # Normalize header names only: sessionId, smsCode and signed payload keys retain case.
+        kwargs['headers'] = {key.lower(): value for key, value in kwargs.get('headers', {}).items()}
+        started = time.monotonic()
         try:
             response = self.transport.post(url, timeout=(5, 15), allow_redirects=False, **kwargs)
-        except requests.RequestException:
+        except requests.RequestException as error:
+            if self.response_log:
+                self.response_log.record(url, started, kwargs, response=error.response, error=error)
             if opening:
                 raise ServiceError("OPEN_RESULT_UNKNOWN", "请求未收到明确结果，请现场确认；不会自动重试", 504) from None
             raise ServiceError("UPSTREAM_UNAVAILABLE", "暂时无法连接亲邻服务，请稍后重试", 503) from None
+        if self.response_log:
+            self.response_log.record(url, started, kwargs, response=response)
         if response.status_code != 200:
             if opening:
                 raise ServiceError("OPEN_RESULT_UNKNOWN", "平台响应异常，开门结果未知，请现场确认", 502)
@@ -105,7 +114,8 @@ class QinlinClient:
         body = {**fields, "timestamp": int(time.time() * 1000), "nonce": str(secrets.randbelow(90000) + 10000), "version": "4.9.3"}
         body["sign"] = sign({"token": token, **body})
         params = {"sessionId": token} if token else {}
-        kwargs = {"headers": self.headers, "params": params}
+        content_type = 'application/x-www-form-urlencoded' if mode == 'form' else 'application/json; charset=utf-8'
+        kwargs = {"headers": {**self.headers, 'content-type': content_type}, "params": params}
         if mode == "query":
             params.update(body)
         elif mode == "form":
@@ -135,7 +145,8 @@ class QinlinClient:
 
     def send_sms(self, phone):
         fields = {"appid": APPID, "mobile": phone, "nonce": str(secrets.randbelow(9000) + 1000), "timestamp": str(int(time.time() * 1000)), "version": "v2"}
-        headers = {**self.headers, **{key.title(): value for key, value in fields.items() if key != "mobile"}, "Sign": sign(fields, f"appsecret={APP_SECRET}")}
+        headers = {**self.headers, **{key: value for key, value in fields.items() if key != "mobile"},
+                   "content-type": "application/json; charset=utf-8", "sign": sign(fields, f"appsecret={APP_SECRET}")}
         data = self._request(SMS_URL, headers=headers, json={"mobile": phone})
         if not (str(data.get("code", data.get("status"))) in ("0", "200") or data.get("success") is True):
             raise ServiceError("SMS_REJECTED", "验证码发送未被确认，请稍后再试", 422)

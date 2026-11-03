@@ -11,3 +11,4 @@ qinlin_doors.json
 *.sqlite3*
 *.db
 *.log
+*.log.*

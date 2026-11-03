@@ -13,6 +13,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from qinlin import QinlinClient, ServiceError
+from gateway_log import GatewayLog
 from storage import Store, digest
 
 COOKIE = "qinlin_admin"
@@ -127,7 +128,7 @@ def create_app(config=None, client=None):
         password_hash = generate_password_hash(password)
     app.config["ADMIN_PASSWORD"] = ""
     store = Store(app.config["DATA_DIR"])
-    client = client or QinlinClient(app.config["QINLIN_AUTH_ERROR_CODES"].split(","))
+    client = client or QinlinClient(app.config["QINLIN_AUTH_ERROR_CODES"].split(","), response_log=GatewayLog(app.config["DATA_DIR"]))
     service = DoorService(store, client)
     app.extensions.update(store=store, doors=service)
 
